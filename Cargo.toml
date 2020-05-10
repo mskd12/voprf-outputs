@@ -1,0 +1,13 @@
+[package]
+name = "voprf-outputs"
+version = "0.1.0"
+authors = ["sm2686 <sm2686@cornell.edu>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+voprf-rs = {path = "voprf-poc/rust"}
+curve25519-dalek = "2.0.0"
+sha2 = "0.8.1"
+hex = "0.4"
