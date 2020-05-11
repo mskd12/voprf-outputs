@@ -1,20 +1,34 @@
+use std::fs;
 use voprf_rs::oprf::{groups, Client, Server, ciphersuite, Input};
 use groups::PrimeOrderGroup;
-// use groups::p384::NistPoint;
-use curve25519_dalek::ristretto::RistrettoPoint;
 use sha2::Sha512;
-
+use serde::Deserialize;
 use groups::redox_ecc::{WPoint,MPoint};
 
 const AUX_DATA: &str = "oprf_finalization_step";
 
-fn main() {
-    let verifable = true;
-    let input_str = "00";
-    let blind_str = "7b";
-    let key = "731eb0cbe382f110010d354e3fa36f6512bd056daf3f3d00996ae3ac642edb4726d410db80c2321771a93f0308ded9c9";
-    // let dleq_scalar = "9d92c4cc962347d56c05e4b749b57e70461145af696ab61cdefb29f8f88162980410d27fdebad4440431ca0efbffead2";
+#[derive(Clone, Deserialize, Debug)]
+struct TestVector {
+    key: String,
+    pub_key: String,
+    inputs: Vec<String>,
+    blinds: Vec<String>,
+    dleq_scalar: String
+}
 
+fn main() {
+    let name = "VOPRF-P384-HKDF-SHA512-SSWU-RO";
+    let tvs: Vec<TestVector> = serde_json::from_str(
+                    &fs::read_to_string(
+                        format!("voprf-poc/test-vectors/{}.json", name)
+                    ).unwrap()).unwrap();
+    println!("{:?}", tvs[0]);
+
+    p384(&tvs[0].inputs[0], &tvs[0].blinds[0], &tvs[0].key, &tvs[0].dleq_scalar)
+}
+
+fn p384(input_str: &str, blind_str: &str, key: &str, dleq_scalar: &str) {
+    let verifable = true;
     let pog = PrimeOrderGroup::<WPoint,Sha512>::p384();
     let ciph = ciphersuite::Ciphersuite::<WPoint,Sha512>::new(pog.clone(), verifable);
     let mut srv = Server::<WPoint,Sha512>::setup(ciph.clone());
@@ -40,7 +54,7 @@ fn main() {
     let blinded_input = cli.blind_fixed(&input.data, &input.blind);
 
     // eval
-    let eval = srv.eval(&[blinded_input.clone()]);
+    let eval = srv.fixed_eval(&[blinded_input.clone()], &hex::decode(dleq_scalar).unwrap());
     assert_eq!(eval.elems.len(), 1);
     if verifable {
         if let Some(d) = &eval.proof {
@@ -58,11 +72,11 @@ fn main() {
     // finalize
     let out = cli.finalize(&input.data, &unblinded_output[0], &AUX_DATA.as_bytes()).expect("Error in finalizing");
 
-    // println!("Unblinded output: {:?}", hex::encode(unblinded_output[0]));
     println!("Output: {}", hex::encode(out));
 
     if verifable {
         let proof = &eval.proof.unwrap(); 
         println!("Proof: [{}, {}]", hex::encode(&proof[0]), hex::encode(&proof[1]));
     }
+
 }
