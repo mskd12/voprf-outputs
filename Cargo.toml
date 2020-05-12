@@ -11,3 +11,5 @@ voprf-rs = {path = "voprf-poc/rust"}
 curve25519-dalek = "2.0.0"
 sha2 = "0.8.1"
 hex = "0.4"
+serde_json = "1.0.45"
+serde = { version = "1.0.104", features = ["derive"] }

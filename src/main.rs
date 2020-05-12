@@ -2,7 +2,7 @@ use std::fs;
 use voprf_rs::oprf::{groups, Client, Server, ciphersuite, Input};
 use groups::PrimeOrderGroup;
 use sha2::Sha512;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use groups::redox_ecc::{WPoint,MPoint};
 
 const AUX_DATA: &str = "oprf_finalization_step";
@@ -13,70 +13,106 @@ struct TestVector {
     pub_key: String,
     inputs: Vec<String>,
     blinds: Vec<String>,
-    dleq_scalar: String
+    dleq_scalar: String,
+}
+
+#[derive(Clone, Serialize, Debug)]
+struct FinalTestVector {
+    key: String,
+    pub_key: String,
+    inputs: Vec<String>,
+    blinds: Vec<String>,
+    dleq_scalar: String,
+    expected: Expected
+}
+
+#[derive(Clone, Serialize, Debug)]
+struct Expected {
+    outputs: Vec<String>,
+    proof: (String, String)
 }
 
 fn main() {
-    let name = "VOPRF-P384-HKDF-SHA512-SSWU-RO";
+    let name = "VOPRF-curve448-HKDF-SHA512-ELL2-RO";
     let tvs: Vec<TestVector> = serde_json::from_str(
                     &fs::read_to_string(
                         format!("voprf-poc/test-vectors/{}.json", name)
                     ).unwrap()).unwrap();
-    println!("{:?}", tvs[0]);
 
-    p384(&tvs[0].inputs[0], &tvs[0].blinds[0], &tvs[0].key, &tvs[0].dleq_scalar)
+    let mut ftvs: Vec<FinalTestVector> = Vec::new();
+
+    for tv in tvs {
+        println!("{:?}", tv);
+
+        let expected = oprf(&tv.inputs, &tv.blinds, &tv.key, &tv.dleq_scalar);
+        ftvs.push(FinalTestVector {
+            key: tv.key.clone(),
+            pub_key: tv.pub_key.clone(),
+            inputs: tv.inputs.clone(),
+            blinds: tv.blinds.clone(),
+            dleq_scalar: tv.dleq_scalar.clone(),
+            expected: expected
+        });
+    }
+
+    fs::write(format!("voprf-poc/test-vectors/{}.json", name),
+                serde_json::to_string_pretty(&ftvs).unwrap()).unwrap()
+    // println!("{}", serde_json::to_string_pretty(&ftvs).unwrap());
 }
 
-fn p384(input_str: &str, blind_str: &str, key: &str, dleq_scalar: &str) {
-    let verifable = true;
-    let pog = PrimeOrderGroup::<WPoint,Sha512>::p384();
-    let ciph = ciphersuite::Ciphersuite::<WPoint,Sha512>::new(pog.clone(), verifable);
-    let mut srv = Server::<WPoint,Sha512>::setup(ciph.clone());
+fn oprf(inputs: &Vec<String>, blinds: &Vec<String>, key: &str, dleq_scalar: &str) -> Expected {
+    let pog = PrimeOrderGroup::<MPoint,Sha512>::c448();
+    let ciph = ciphersuite::Ciphersuite::<MPoint,Sha512>::new(pog.clone(), true);
+    let mut srv = Server::<MPoint,Sha512>::setup(ciph.clone());
     srv.set_key(hex::decode(key).unwrap());
 
-    let cli = match Client::<WPoint,Sha512>::setup(ciph.clone(), Some(srv.key.pub_key(&pog))) {
+    let cli = match Client::<MPoint,Sha512>::setup(ciph.clone(), Some(srv.key.pub_key(&pog))) {
         Ok(c) => c,
         Err(e) => panic!(e),
     };
 
-    let input = Input::<WPoint>{
-        data: hex::decode(input_str).unwrap(),
-        elem: pog.generator.clone(), 
-        blind: hex::decode(blind_str).unwrap()
-    };
-
-    println!("Input: {}", hex::encode(&input.data));
-    println!("Blind: {}", hex::encode(&input.blind));
-    println!("Secret key: {}", srv.key.as_hex());
-    println!("Public key: {}", srv.key.pub_key(&pog).as_hex(&pog));
-
     // generate blinded input
-    let blinded_input = cli.blind_fixed(&input.data, &input.blind);
+    let mut blinded_inputs: Vec<Input<MPoint>> = Vec::new(); 
+    for (input, blind) in inputs.into_iter().zip(blinds) {
+        let input = hex::decode(input).unwrap();
+        let blind = hex::decode(blind).unwrap();
+        let blinded_input = cli.blind_fixed(&input, &blind);
+        blinded_inputs.push(Input{
+            data: input,
+            elem: blinded_input,
+            blind: blind
+        });
+    }
 
     // eval
-    let eval = srv.fixed_eval(&[blinded_input.clone()], &hex::decode(dleq_scalar).unwrap());
-    assert_eq!(eval.elems.len(), 1);
-    if verifable {
-        if let Some(d) = &eval.proof {
-            assert_eq!(d.len(), 2)
-        } else {
-            panic!("a proof should have been provided")
-        }
+    let mut input_elems = Vec::new();
+    for input in &blinded_inputs {
+        input_elems.push(input.elem.clone());
+    }
+    let eval = srv.fixed_eval(&input_elems, &hex::decode(dleq_scalar).unwrap());
+    if let Some(d) = &eval.proof {
+        assert_eq!(d.len(), 2)
+    } else {
+        panic!("a proof should have been provided")
     }
 
-    let mut updated_input = input.clone();
-    updated_input.elem = blinded_input;
     // unblind
-    let unblinded_output = cli.unblind(&[updated_input], &eval).expect("Error in unblinding operation");
+    let mut outputs: Vec<String> = Vec::new();
+    match cli.unblind(&blinded_inputs, &eval) {
+        Ok(u) => {
+            // finalize
+            for i in 0..blinded_inputs.len() {
+                let input_data = &blinded_inputs[i].data;
+                let out = cli.finalize(&input_data, &u[i], &AUX_DATA.as_bytes()).expect("Error in finalizing");
+                outputs.push(hex::encode(out));
+            }
+        },
+        Err(e) => panic!(e)
+    };
 
-    // finalize
-    let out = cli.finalize(&input.data, &unblinded_output[0], &AUX_DATA.as_bytes()).expect("Error in finalizing");
-
-    println!("Output: {}", hex::encode(out));
-
-    if verifable {
-        let proof = &eval.proof.unwrap(); 
-        println!("Proof: [{}, {}]", hex::encode(&proof[0]), hex::encode(&proof[1]));
+    let proof = &eval.proof.unwrap();
+    Expected {
+        outputs: outputs,
+        proof: (hex::encode(&proof[0]), hex::encode(&proof[1]))
     }
-
 }
